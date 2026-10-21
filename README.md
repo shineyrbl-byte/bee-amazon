@@ -16,6 +16,16 @@ Built for the Amazon Developer Hackathon (Bee track, plus the AWS Builder and Op
 3. The transcript goes to Claude on Amazon Bedrock (Converse API), which returns structured JSON:
    task, person, due date, confidence, and a draft message.
 4. `app.py` (Streamlit) groups tasks by Overdue / Today / Tomorrow / Later and shows copyable drafts.
+5. Each dated task can be exported to your calendar as an `.ics` file (one task, or all at once).
+
+## Features
+
+- Keeps only *your* commitments and ignores promises other people made.
+- Resolves "Friday" or "tomorrow morning" to real dates.
+- Treats unidentified ("Unknown") solo speech as the user.
+- Optional known-contacts list (sidebar or `CONTACTS` env var) to fix names that speech-to-text mishears.
+- Look-back slider to focus on recent conversations.
+- Draft follow-up message per task, and calendar export.
 
 ## Setup
 
@@ -50,7 +60,7 @@ Only record yourself or people who have agreed to be recorded.
 
 - Reads the last ~10 hours of Bee conversations (what `bee now` returns).
 - Speech-to-text errors can still cause missed or wrong tasks; confidence scores help you spot them.
-- Tasks are not saved or synced to a calendar yet.
+- Tasks are not saved between runs; calendar export is a manual `.ics` download.
 
 ## License
 
