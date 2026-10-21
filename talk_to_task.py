@@ -7,6 +7,7 @@ CLI usage:
 """
 
 import datetime
+import hashlib
 import json
 import os
 import subprocess
@@ -18,6 +19,9 @@ import boto3
 MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-6")
 REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
 USER_NAME = os.environ.get("USER_NAME", "Avisha")  # the speaker name Bee shows for you
+CONTACTS = os.environ.get(
+    "CONTACTS", ""
+)  # optional: "Priya, Rahul, Meera" to fix misheard names
 
 DEMO_CONVERSATIONS = [
     {
@@ -36,7 +40,7 @@ DEMO_CONVERSATIONS = [
 
 PROMPT = """Today is {today} ({weekday}). Below is a transcript of conversations the user ("{user}") had.
 Speech-to-text may contain small errors; use context to fix obvious ones.
-Bee often cannot identify the user's voice and labels it "Unknown". Treat "Unknown" lines as the user speaking unless the context clearly shows it is someone else.
+{contacts_line}Bee often cannot identify the user's voice and labels it "Unknown". Treat "Unknown" lines as the user speaking unless the context clearly shows it is someone else.
 Find every commitment the USER ("{user}") made or was asked to do. Ignore things other people promised.
 Return ONLY a JSON array (no markdown fences). Each item must have:
   "task": short action phrase,
@@ -67,7 +71,7 @@ def build_transcript(conversation: dict) -> str:
     return "\n".join(lines)
 
 
-def fetch_conversations(demo: bool = False) -> list[dict]:
+def fetch_conversations(demo: bool = False, hours: float | None = None) -> list[dict]:
     """Return [{'id', 'title', 'start', 'text'}, ...]. Only transcript text is kept (no location etc.)."""
     if demo:
         return DEMO_CONVERSATIONS
@@ -76,8 +80,13 @@ def fetch_conversations(demo: bool = False) -> list[dict]:
     )
     data = json.loads(result.stdout)
     conversations = []
+    cutoff_ms = (
+        (datetime.datetime.now().timestamp() - hours * 3600) * 1000 if hours else None
+    )
     for c in data.get("conversations", []):
         start_ms = c.get("start_time")
+        if cutoff_ms and start_ms and start_ms < cutoff_ms:
+            continue
         start = (
             datetime.datetime.fromtimestamp(start_ms / 1000).strftime("%Y-%m-%d %H:%M")
             if start_ms
@@ -94,17 +103,25 @@ def fetch_conversations(demo: bool = False) -> list[dict]:
     return conversations
 
 
-def extract_tasks(conversations: list[dict]) -> list[dict]:
+def extract_tasks(conversations: list[dict], contacts: str = "") -> list[dict]:
     if not conversations:
         return []
     transcript = "\n\n".join(
         f"[{c['start']}] {c['title']}\n{c['text']}" for c in conversations
     )
     today = datetime.date.today()
+    contacts = contacts or CONTACTS
+    contacts_line = (
+        f"Known contacts: {contacts}. Speech-to-text often mishears names; if a name sounds like "
+        "a known contact, use the known contact's spelling.\n"
+        if contacts.strip()
+        else ""
+    )
     prompt = PROMPT.format(
         today=today.isoformat(),
         weekday=today.strftime("%A"),
         user=USER_NAME,
+        contacts_line=contacts_line,
         transcript=transcript,
     )
     client = boto3.client("bedrock-runtime", region_name=REGION)
@@ -136,6 +153,57 @@ def due_bucket(due: str | None) -> str:
     if delta == 1:
         return "Tomorrow"
     return "Later"
+
+
+def _ics_escape(text: str) -> str:
+    return (
+        text.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\n", "\\n")
+    )
+
+
+def _ics_fold(line: str, width: int = 60) -> list[str]:
+    """Fold long lines as the iCalendar spec requires (continuation lines start with a space)."""
+    parts = [line[:width]]
+    parts += [" " + line[i : i + width - 1] for i in range(width, len(line), width - 1)]
+    return parts
+
+
+def tasks_to_ics(tasks: list[dict]) -> str:
+    """Build an .ics file with one all-day event per task that has a valid due date."""
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Talk-to-Task//EN",
+        "CALSCALE:GREGORIAN",
+    ]
+    for t in tasks:
+        try:
+            due = datetime.date.fromisoformat(t.get("due") or "")
+        except ValueError:
+            continue
+        summary = t["task"] + (f" ({t['person']})" if t.get("person") else "")
+        uid = hashlib.md5(f"{t['task']}{due}".encode()).hexdigest() + "@talk-to-task"
+        event = [
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTAMP:{now}",
+            f"DTSTART;VALUE=DATE:{due.strftime('%Y%m%d')}",
+            f"DTEND;VALUE=DATE:{(due + datetime.timedelta(days=1)).strftime('%Y%m%d')}",
+            f"SUMMARY:{_ics_escape(summary)}",
+        ]
+        if t.get("draft_message"):
+            event.append(
+                f"DESCRIPTION:{_ics_escape('Draft message: ' + t['draft_message'])}"
+            )
+        event.append("END:VEVENT")
+        for line in event:
+            lines.extend(_ics_fold(line))
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines) + "\r\n"
 
 
 def write_markdown(tasks: list[dict], path: str = "tasks.md") -> None:
