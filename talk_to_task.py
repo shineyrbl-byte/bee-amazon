@@ -206,6 +206,80 @@ def tasks_to_ics(tasks: list[dict]) -> str:
     return "\r\n".join(lines) + "\r\n"
 
 
+# ---------- Local task store (so tasks survive between runs) ----------
+STORE_PATH = os.environ.get("TASK_STORE", "tasks_store.json")
+
+
+def task_key(task: dict) -> str:
+    """Identity of a task, so the same promise isn't stored twice."""
+    person = (task.get("person") or "").strip().lower()
+    due = task.get("due") or ""
+    if person and due:
+        return f"{person}|{due}"
+    return f"{(task.get('task') or '').strip().lower()}|{due}"
+
+
+def load_store(path: str = STORE_PATH) -> list[dict]:
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def save_store(tasks: list[dict], path: str = STORE_PATH) -> None:
+    with open(path, "w") as f:
+        json.dump(tasks, f, indent=2)
+
+
+def merge_tasks(store: list[dict], new: list[dict]) -> list[dict]:
+    """Add newly extracted tasks to the stored ones, keeping done/in_bee flags of existing ones."""
+    by_key = {t["key"]: t for t in store}
+    today = datetime.date.today().isoformat()
+    for t in new:
+        if not t.get("task"):
+            continue
+        key = task_key(t)
+        if key in by_key:
+            existing = by_key[key]
+            for field in ("confidence", "draft_message"):
+                if t.get(field) is not None:
+                    existing[field] = t[field]
+        else:
+            by_key[key] = {
+                **t,
+                "key": key,
+                "done": False,
+                "in_bee": False,
+                "added_at": today,
+            }
+    return list(by_key.values())
+
+
+def add_to_bee(task: dict) -> tuple[bool, str]:
+    """Create a todo in Bee. The CLI docs I found disagree on the command, so try both forms."""
+    text = task["task"]
+    if task.get("person"):
+        text += f" ({task['person']})"
+    if task.get("due"):
+        text += f" - due {task['due']}"
+    last_error = ""
+    for cmd in (
+        ["bee", "todos", "create", "--text", text],
+        ["bee", "todos", "add", text],
+    ):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except FileNotFoundError:
+            return False, "The `bee` command wasn't found."
+        except subprocess.TimeoutExpired:
+            return False, "Bee took too long to respond."
+        if r.returncode == 0:
+            return True, r.stdout.strip() or "Added."
+        last_error = (r.stderr or r.stdout).strip()
+    return False, last_error or "Bee rejected the request."
+
+
 def write_markdown(tasks: list[dict], path: str = "tasks.md") -> None:
     lines = [f"# What I promised ({datetime.date.today().isoformat()})", ""]
     for t in sorted(tasks, key=lambda x: x.get("due") or "9999"):
