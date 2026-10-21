@@ -18,6 +18,19 @@ with st.sidebar:
         value=False,
         help="Use built-in sample text instead of live Bee data.",
     )
+    hours = st.slider(
+        "Look back (hours)",
+        1,
+        10,
+        10,
+        help="Only include conversations from the last N hours.",
+    )
+    contacts = st.text_input(
+        "People you talk to (optional)",
+        value=t.CONTACTS,
+        placeholder="Priya, Rahul, Meera",
+        help="Helps fix names that speech-to-text mishears.",
+    )
     run = st.button("Fetch & analyze", type="primary", use_container_width=True)
     st.caption(
         "Reads the last ~10 hours of your Bee conversations. Only transcript text is sent to the model."
@@ -26,9 +39,9 @@ with st.sidebar:
 if run:
     try:
         with st.spinner("Reading your Bee conversations..."):
-            convs = t.fetch_conversations(demo)
+            convs = t.fetch_conversations(demo, hours)
         with st.spinner("Finding your promises..."):
-            tasks = t.extract_tasks(convs)
+            tasks = t.extract_tasks(convs, contacts)
         st.session_state["convs"] = convs
         st.session_state["tasks"] = tasks
     except FileNotFoundError:
@@ -57,6 +70,14 @@ else:
 
     if not tasks:
         st.success("No commitments found in this window.")
+    elif any(task.get("due") for task in tasks):
+        st.download_button(
+            "📅 Add all to calendar (.ics)",
+            data=t.tasks_to_ics(tasks),
+            file_name="promises.ics",
+            mime="text/calendar",
+            key="ics-all",
+        )
 
     for name, items in buckets.items():
         if not items:
@@ -75,6 +96,14 @@ else:
                 if task.get("draft_message"):
                     st.caption("Draft follow-up (use the copy icon):")
                     st.code(task["draft_message"], language=None)
+                if task.get("due"):
+                    st.download_button(
+                        "📅 Add to calendar",
+                        data=t.tasks_to_ics([task]),
+                        file_name="promise.ics",
+                        mime="text/calendar",
+                        key=f"ics-{name}-{i}",
+                    )
 
     with st.expander("What Bee heard"):
         for c in convs:
