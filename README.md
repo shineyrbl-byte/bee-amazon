@@ -25,7 +25,11 @@ Built for the Amazon Developer Hackathon (Bee track, plus the AWS Builder and Op
 - Treats unidentified ("Unknown") solo speech as the user.
 - Optional known-contacts list (sidebar or `CONTACTS` env var) to fix names that speech-to-text mishears.
 - Look-back slider to focus on recent conversations.
-- Draft follow-up message per task, and calendar export.
+- Draft follow-up message per task, with one-click WhatsApp and email links.
+- Calendar export (`.ics`) for one task or all open tasks.
+- **Add to Bee**: writes a task back into your Bee todos with `bee todos`.
+- Tasks are saved locally in `tasks_store.json` between runs, with a Done list and a "Carried over" count for promises from earlier days.
+- Low-confidence tasks are flagged so you can double-check them.
 
 ## Setup
 
@@ -53,14 +57,16 @@ Command-line version: `python talk_to_task.py` (or `--demo`) writes `tasks.md`.
 
 ## Privacy
 
-Everything runs locally except the call to Amazon Bedrock, which receives only transcript text.
+Everything runs locally except the call to Amazon Bedrock, which receives only transcript text. Saved tasks stay in `tasks_store.json` on your machine (it is git-ignored).
 Only record yourself or people who have agreed to be recorded.
 
 ## Limitations
 
 - Reads the last ~10 hours of Bee conversations (what `bee now` returns).
 - Speech-to-text errors can still cause missed or wrong tasks; confidence scores help you spot them.
-- Tasks are not saved between runs; calendar export is a manual `.ics` download.
+- Tasks with the same person and due date are treated as the same promise, so two different promises to one person on one day would merge.
+- The Add to Bee button tries `bee todos create --text` and falls back to `bee todos add`, because the CLI docs I found differ; the due date goes in the todo text.
+- Calendar export is a manual `.ics` download.
 
 ## License
 
