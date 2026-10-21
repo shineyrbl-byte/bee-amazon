@@ -30,6 +30,9 @@ Built for the Amazon Developer Hackathon (Bee track, plus the AWS Builder and Op
 - **Add to Bee**: writes a task back into your Bee todos with `bee todos`.
 - Tasks are saved locally in `tasks_store.json` between runs, with a Done list and a "Carried over" count for promises from earlier days.
 - Low-confidence tasks are flagged so you can double-check them.
+- Edit any task (name, person, due date, draft) or remove a wrong one; your edits are not overwritten by later runs.
+- A "This week" view shows promises made versus kept.
+- Optional daily macOS notification of what is overdue, due today or due tomorrow (see below).
 
 ## Setup
 
@@ -54,6 +57,12 @@ Requirements: Python 3.10+, Node.js, an AWS account with Amazon Bedrock access, 
    Click **Fetch & analyze**. Use the **Demo mode** toggle to try it without Bee data.
 
 Command-line version: `python talk_to_task.py` (or `--demo`) writes `tasks.md`.
+
+## Morning notification (macOS, optional)
+
+`notify.py` reads the saved tasks and shows a notification summarising what is due. Try it with `python notify.py`,
+then schedule it daily with `bash schedule_notification.sh 9` (9 = hour of the day) and remove it with
+`bash schedule_notification.sh --remove`. It summarises tasks already saved by the app; it does not fetch new Bee data.
 
 ## Privacy
 
