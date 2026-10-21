@@ -207,7 +207,10 @@ def tasks_to_ics(tasks: list[dict]) -> str:
 
 
 # ---------- Local task store (so tasks survive between runs) ----------
-STORE_PATH = os.environ.get("TASK_STORE", "tasks_store.json")
+STORE_PATH = os.environ.get(
+    "TASK_STORE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks_store.json"),
+)
 
 
 def task_key(task: dict) -> str:
@@ -242,6 +245,8 @@ def merge_tasks(store: list[dict], new: list[dict]) -> list[dict]:
         key = task_key(t)
         if key in by_key:
             existing = by_key[key]
+            if existing.get("edited"):
+                continue  # the user fixed this one by hand; keep their version
             for field in ("confidence", "draft_message"):
                 if t.get(field) is not None:
                     existing[field] = t[field]
@@ -278,6 +283,70 @@ def add_to_bee(task: dict) -> tuple[bool, str]:
             return True, r.stdout.strip() or "Added."
         last_error = (r.stderr or r.stdout).strip()
     return False, last_error or "Bee rejected the request."
+
+
+# ---------- Weekly stats and morning notification ----------
+def weekly_stats(store: list[dict], today: datetime.date | None = None) -> dict:
+    """Promises made / kept over the last 7 days (including today)."""
+    today = today or datetime.date.today()
+    days = [(today - datetime.timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+    visible = [t for t in store if not t.get("dismissed")]
+    cohort = [t for t in visible if t.get("added_at") in days]
+    return {
+        "days": days,
+        "made": [sum(1 for t in visible if t.get("added_at") == d) for d in days],
+        "kept": [
+            sum(1 for t in visible if t.get("done") and t.get("done_at") == d)
+            for d in days
+        ],
+        "cohort_made": len(cohort),
+        "cohort_done": sum(1 for t in cohort if t.get("done")),
+    }
+
+
+def morning_message(store: list[dict]) -> tuple[str, str]:
+    """Short title and body summarising what is overdue, due today and due tomorrow."""
+    groups = {"Overdue": [], "Today": [], "Tomorrow": []}
+    for t in store:
+        if t.get("done") or t.get("dismissed"):
+            continue
+        bucket = due_bucket(t.get("due"))
+        if bucket in groups:
+            groups[bucket].append(t)
+    title = "\U0001f41d Your promises"
+    if not any(groups.values()):
+        return title, "Nothing due today or tomorrow."
+    counts = " · ".join(
+        f"{name}: {len(items)}" for name, items in groups.items() if items
+    )
+    top = []
+    for name, items in groups.items():
+        for t in items:
+            top.append(
+                f"{name}: {t['task']}"
+                + (f" ({t['person']})" if t.get("person") else "")
+            )
+    return title, counts + "\n" + "\n".join(top[:3])
+
+
+def send_notification(title: str, body: str) -> bool:
+    """Show a macOS notification. Returns False on other systems or if it fails."""
+    if sys.platform != "darwin":
+        return False
+
+    def esc(x: str) -> str:
+        return x.replace("\\", "\\\\").replace('"', '\\"')
+
+    script = f'display notification "{esc(body[:230])}" with title "{esc(title)}"'
+    try:
+        return (
+            subprocess.run(
+                ["osascript", "-e", script], capture_output=True, timeout=15
+            ).returncode
+            == 0
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
 
 
 def write_markdown(tasks: list[dict], path: str = "tasks.md") -> None:
