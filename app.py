@@ -1,5 +1,8 @@
 """Talk-to-Task web UI. Run with: streamlit run app.py"""
 
+import datetime
+from urllib.parse import quote
+
 import streamlit as st
 
 import talk_to_task as t
@@ -10,6 +13,18 @@ st.title("🐝 Talk-to-Task")
 st.caption(
     "Promises you made out loud, captured by Bee, turned into tasks by Claude on Amazon Bedrock."
 )
+
+# Tasks persist in a local file between runs (never in demo mode).
+if "store" not in st.session_state:
+    st.session_state["store"] = t.load_store()
+    st.session_state["persist"] = True
+    st.session_state["convs"] = []
+
+
+def save() -> None:
+    if st.session_state["persist"]:
+        t.save_store(st.session_state["store"])
+
 
 with st.sidebar:
     st.header("Source")
@@ -33,17 +48,25 @@ with st.sidebar:
     )
     run = st.button("Fetch & analyze", type="primary", use_container_width=True)
     st.caption(
-        "Reads the last ~10 hours of your Bee conversations. Only transcript text is sent to the model."
+        "Only transcript text is sent to the model. Tasks are saved locally in tasks_store.json."
     )
+    if st.button("Clear saved tasks", use_container_width=True):
+        st.session_state["store"] = []
+        st.session_state["persist"] = True
+        save()
+        st.rerun()
 
 if run:
     try:
         with st.spinner("Reading your Bee conversations..."):
             convs = t.fetch_conversations(demo, hours)
         with st.spinner("Finding your promises..."):
-            tasks = t.extract_tasks(convs, contacts)
+            new_tasks = t.extract_tasks(convs, contacts)
+        base = [] if demo else t.load_store()
+        st.session_state["store"] = t.merge_tasks(base, new_tasks)
+        st.session_state["persist"] = not demo
         st.session_state["convs"] = convs
-        st.session_state["tasks"] = tasks
+        save()
     except FileNotFoundError:
         st.error(
             "The `bee` command wasn't found. Make sure the Bee CLI is installed and on your PATH."
@@ -51,29 +74,87 @@ if run:
     except Exception as e:  # show a readable error instead of a traceback
         st.error(f"Something went wrong: {e}")
 
-tasks = st.session_state.get("tasks")
-convs = st.session_state.get("convs", [])
+store = st.session_state["store"]
+convs = st.session_state["convs"]
+today = datetime.date.today().isoformat()
 
-if tasks is None:
+
+def render_task(task: dict, group: str) -> None:
+    with st.container(border=True):
+        done = st.checkbox(
+            f"**{task['task']}**", value=task["done"], key=f"done-{group}-{task['key']}"
+        )
+        if done != task["done"]:
+            task["done"] = done
+            save()
+            st.rerun()
+        bits = []
+        if task.get("person"):
+            bits.append(f"👤 {task['person']}")
+        bits.append(f"📅 {task.get('due') or 'no date'}")
+        if task.get("confidence") is not None:
+            conf = int(float(task["confidence"]) * 100)
+            bits.append(
+                f"confidence {conf}%" + (" ⚠️ check this one" if conf < 70 else "")
+            )
+        st.caption("  ·  ".join(bits))
+
+        draft = task.get("draft_message")
+        if draft:
+            st.caption("Draft follow-up (use the copy icon):")
+            st.code(draft, language=None)
+
+        cols = st.columns(4)
+        if draft:
+            cols[0].link_button("💬 WhatsApp", f"https://wa.me/?text={quote(draft)}")
+            cols[1].link_button(
+                "✉️ Email", f"mailto:?subject={quote(task['task'])}&body={quote(draft)}"
+            )
+        if task.get("due"):
+            cols[2].download_button(
+                "📅 Calendar",
+                data=t.tasks_to_ics([task]),
+                file_name="promise.ics",
+                mime="text/calendar",
+                key=f"ics-{group}-{task['key']}",
+            )
+        if task.get("in_bee"):
+            cols[3].caption("✅ In Bee todos")
+        elif cols[3].button("➕ Add to Bee", key=f"bee-{group}-{task['key']}"):
+            ok, message = t.add_to_bee(task)
+            if ok:
+                task["in_bee"] = True
+                save()
+                st.rerun()
+            else:
+                st.error(f"Couldn't add to Bee: {message}")
+
+
+if not store:
     st.info("Click **Fetch & analyze** in the sidebar to get started.")
 else:
+    open_tasks = [x for x in store if not x["done"]]
+    done_tasks = [x for x in store if x["done"]]
+    carried = [x for x in open_tasks if x.get("added_at", today) < today]
+
     buckets = {"Overdue": [], "Today": [], "Tomorrow": [], "Later": [], "No date": []}
-    for task in tasks:
+    for task in open_tasks:
         buckets[t.due_bucket(task.get("due"))].append(task)
 
     st.subheader("Morning summary")
-    cols = st.columns(4)
-    cols[0].metric("Total promises", len(tasks))
+    cols = st.columns(5)
+    cols[0].metric("Open promises", len(open_tasks))
     cols[1].metric("Overdue", len(buckets["Overdue"]))
     cols[2].metric("Due today", len(buckets["Today"]))
     cols[3].metric("Due tomorrow", len(buckets["Tomorrow"]))
+    cols[4].metric(
+        "Carried over", len(carried), help="Open promises from earlier days."
+    )
 
-    if not tasks:
-        st.success("No commitments found in this window.")
-    elif any(task.get("due") for task in tasks):
+    if any(x.get("due") for x in open_tasks):
         st.download_button(
-            "📅 Add all to calendar (.ics)",
-            data=t.tasks_to_ics(tasks),
+            "📅 Add all open tasks to calendar (.ics)",
+            data=t.tasks_to_ics(open_tasks),
             file_name="promises.ics",
             mime="text/calendar",
             key="ics-all",
@@ -83,28 +164,15 @@ else:
         if not items:
             continue
         st.subheader(name)
-        for i, task in enumerate(sorted(items, key=lambda x: x.get("due") or "9999")):
-            with st.container(border=True):
-                st.checkbox(f"**{task['task']}**", key=f"{name}-{i}")
-                bits = []
-                if task.get("person"):
-                    bits.append(f"👤 {task['person']}")
-                bits.append(f"📅 {task.get('due') or 'no date'}")
-                if task.get("confidence") is not None:
-                    bits.append(f"confidence {int(float(task['confidence']) * 100)}%")
-                st.caption("  ·  ".join(bits))
-                if task.get("draft_message"):
-                    st.caption("Draft follow-up (use the copy icon):")
-                    st.code(task["draft_message"], language=None)
-                if task.get("due"):
-                    st.download_button(
-                        "📅 Add to calendar",
-                        data=t.tasks_to_ics([task]),
-                        file_name="promise.ics",
-                        mime="text/calendar",
-                        key=f"ics-{name}-{i}",
-                    )
+        for task in sorted(items, key=lambda x: x.get("due") or "9999"):
+            render_task(task, name)
 
+    if done_tasks:
+        with st.expander(f"Done ({len(done_tasks)})"):
+            for task in done_tasks:
+                render_task(task, "done")
+
+if convs:
     with st.expander("What Bee heard"):
         for c in convs:
             st.markdown(f"**{c['title']}** — {c['start']}")
