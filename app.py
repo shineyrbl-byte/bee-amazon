@@ -3,6 +3,7 @@
 import datetime
 from urllib.parse import quote
 
+import pandas as pd
 import streamlit as st
 
 import talk_to_task as t
@@ -50,6 +51,14 @@ with st.sidebar:
     st.caption(
         "Only transcript text is sent to the model. Tasks are saved locally in tasks_store.json."
     )
+
+    st.divider()
+    if st.button("🔔 Preview morning notification", use_container_width=True):
+        title, body = t.morning_message(st.session_state["store"])
+        shown = t.send_notification(title, body)
+        st.info(f"{title}\n\n{body}")
+        if not shown:
+            st.caption("Desktop notifications work on macOS only.")
     if st.button("Clear saved tasks", use_container_width=True):
         st.session_state["store"] = []
         st.session_state["persist"] = True
@@ -74,20 +83,24 @@ if run:
     except Exception as e:  # show a readable error instead of a traceback
         st.error(f"Something went wrong: {e}")
 
-store = st.session_state["store"]
+store = [x for x in st.session_state["store"] if not x.get("dismissed")]
 convs = st.session_state["convs"]
 today = datetime.date.today().isoformat()
 
 
 def render_task(task: dict, group: str) -> None:
+    uid = f"{group}-{task['key']}"
     with st.container(border=True):
-        done = st.checkbox(
-            f"**{task['task']}**", value=task["done"], key=f"done-{group}-{task['key']}"
-        )
+        done = st.checkbox(f"**{task['task']}**", value=task["done"], key=f"done-{uid}")
         if done != task["done"]:
             task["done"] = done
+            if done:
+                task["done_at"] = today
+            else:
+                task.pop("done_at", None)
             save()
             st.rerun()
+
         bits = []
         if task.get("person"):
             bits.append(f"👤 {task['person']}")
@@ -97,6 +110,8 @@ def render_task(task: dict, group: str) -> None:
             bits.append(
                 f"confidence {conf}%" + (" ⚠️ check this one" if conf < 70 else "")
             )
+        if task.get("edited"):
+            bits.append("✏️ edited")
         st.caption("  ·  ".join(bits))
 
         draft = task.get("draft_message")
@@ -116,11 +131,11 @@ def render_task(task: dict, group: str) -> None:
                 data=t.tasks_to_ics([task]),
                 file_name="promise.ics",
                 mime="text/calendar",
-                key=f"ics-{group}-{task['key']}",
+                key=f"ics-{uid}",
             )
         if task.get("in_bee"):
             cols[3].caption("✅ In Bee todos")
-        elif cols[3].button("➕ Add to Bee", key=f"bee-{group}-{task['key']}"):
+        elif cols[3].button("➕ Add to Bee", key=f"bee-{uid}"):
             ok, message = t.add_to_bee(task)
             if ok:
                 task["in_bee"] = True
@@ -128,6 +143,39 @@ def render_task(task: dict, group: str) -> None:
                 st.rerun()
             else:
                 st.error(f"Couldn't add to Bee: {message}")
+
+        with st.expander("✏️ Edit or remove"):
+            with st.form(f"edit-{uid}"):
+                new_task = st.text_input("Task", value=task["task"])
+                new_person = st.text_input("Person", value=task.get("person") or "")
+                new_due = st.text_input(
+                    "Due date (YYYY-MM-DD, blank for none)", value=task.get("due") or ""
+                )
+                new_draft = st.text_area(
+                    "Draft message", value=task.get("draft_message") or ""
+                )
+                saved = st.form_submit_button("Save changes")
+            if saved:
+                due_clean = new_due.strip()
+                valid = True
+                if due_clean:
+                    try:
+                        datetime.date.fromisoformat(due_clean)
+                    except ValueError:
+                        valid = False
+                        st.error("Use the format YYYY-MM-DD, for example 2026-10-23.")
+                if valid and new_task.strip():
+                    task["task"] = new_task.strip()
+                    task["person"] = new_person.strip() or None
+                    task["due"] = due_clean or None
+                    task["draft_message"] = new_draft.strip() or None
+                    task["edited"] = True
+                    save()
+                    st.rerun()
+            if st.button("🗑️ Not a real promise: remove", key=f"rm-{uid}"):
+                task["dismissed"] = True
+                save()
+                st.rerun()
 
 
 if not store:
@@ -150,6 +198,20 @@ else:
     cols[4].metric(
         "Carried over", len(carried), help="Open promises from earlier days."
     )
+
+    with st.expander("📈 This week"):
+        stats = t.weekly_stats(store)
+        made, kept = stats["cohort_made"], stats["cohort_done"]
+        c = st.columns(4)
+        c[0].metric("Promises made", made)
+        c[1].metric("Kept", kept)
+        c[2].metric("Kept rate", f"{round(100 * kept / made) if made else 0}%")
+        c[3].metric("Still open", made - kept)
+        st.bar_chart(
+            pd.DataFrame(
+                {"Made": stats["made"], "Kept": stats["kept"]}, index=stats["days"]
+            )
+        )
 
     if any(x.get("due") for x in open_tasks):
         st.download_button(
