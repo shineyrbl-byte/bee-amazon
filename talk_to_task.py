@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Talk-to-Task: turn spoken commitments captured by Bee into tasks + draft follow-ups."""
+"""Talk-to-Task core: read Bee conversations, extract commitments with Claude on Amazon Bedrock.
+
+CLI usage:
+    python talk_to_task.py          # live Bee data (runs `bee now --json`)
+    python talk_to_task.py --demo   # built-in sample data
+"""
 import datetime
 import json
 import os
@@ -8,42 +13,81 @@ import sys
 
 import boto3
 
-MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "PASTE-MODEL-ID-HERE")
-REGION = os.environ.get("AWS_REGION", "us-east-1")
+# Set these in your terminal (see README): the Bedrock inference profile ID and region.
+MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-6")
+REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
 USER_NAME = os.environ.get("USER_NAME", "Avisha")  # the speaker name Bee shows for you
 
-DEMO_TEXT = """
-Alex: Can you send me the project report?
-Avisha: Sure, I'll send you the report by Friday.
-Avisha: Also remind me to call the landlord about the leak tomorrow morning.
-Priya: We should book the venue soon.
-Avisha: I'll check prices and message you on Monday.
-"""
+DEMO_CONVERSATIONS = [
+    {
+        "id": "demo-1",
+        "title": "Planning the weekend",
+        "start": "2026-10-21 10:00",
+        "text": (
+            "Alex: Can you send me the project report?\n"
+            f"{USER_NAME}: Sure, I'll send you the report by Friday.\n"
+            f"{USER_NAME}: Also remind me to call Rahul about the venue tomorrow morning.\n"
+            "Priya: We should book the venue soon.\n"
+            f"{USER_NAME}: I'll check prices and message you on Monday."
+        ),
+    }
+]
 
-PROMPT = """Today is {today}. Below is a transcript of conversations the user ("{user}") had.
+PROMPT = """Today is {today} ({weekday}). Below is a transcript of conversations the user ("{user}") had.
+Speech-to-text may contain small errors; use context to fix obvious ones.
 Find every commitment the USER ("{user}") made or was asked to do. Ignore things other people promised.
 Return ONLY a JSON array (no markdown fences). Each item must have:
   "task": short action phrase,
   "person": who it involves (or null),
   "due": ISO date YYYY-MM-DD (resolve words like "Friday" using today's date) or null,
   "confidence": number 0-1,
-  "draft_message": a short, friendly follow-up message to that person (or null).
+  "draft_message": a short, friendly follow-up message to that person (or null if no person is named).
+If there are no commitments, return [].
 
 Transcript:
 {transcript}
 """
 
 
-def get_transcript(demo: bool) -> str:
+def build_transcript(conversation: dict) -> str:
+    """Flatten one conversation from `bee now --json` into 'Speaker: text' lines, in time order."""
+    utterances = []
+    for transcription in conversation.get("transcriptions", []):
+        utterances.extend(transcription.get("utterances", []))
+    utterances.sort(key=lambda u: u.get("spoken_at", 0))
+    return "\n".join(f"{u.get('speaker', 'Unknown')}: {u.get('text', '')}" for u in utterances)
+
+
+def fetch_conversations(demo: bool = False) -> list[dict]:
+    """Return [{'id', 'title', 'start', 'text'}, ...]. Only transcript text is kept (no location etc.)."""
     if demo:
-        return DEMO_TEXT
-    result = subprocess.run(["bee", "now"], capture_output=True, text=True, check=True)
-    return result.stdout
+        return DEMO_CONVERSATIONS
+    result = subprocess.run(["bee", "now", "--json"], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    conversations = []
+    for c in data.get("conversations", []):
+        start_ms = c.get("start_time")
+        start = datetime.datetime.fromtimestamp(start_ms / 1000).strftime("%Y-%m-%d %H:%M") if start_ms else ""
+        conversations.append(
+            {
+                "id": c.get("id"),
+                "title": c.get("short_summary") or "Conversation",
+                "start": start,
+                "text": build_transcript(c),
+            }
+        )
+    return conversations
 
 
-def extract_tasks(transcript: str) -> list[dict]:
+def extract_tasks(conversations: list[dict]) -> list[dict]:
+    if not conversations:
+        return []
+    transcript = "\n\n".join(f"[{c['start']}] {c['title']}\n{c['text']}" for c in conversations)
+    today = datetime.date.today()
+    prompt = PROMPT.format(
+        today=today.isoformat(), weekday=today.strftime("%A"), user=USER_NAME, transcript=transcript
+    )
     client = boto3.client("bedrock-runtime", region_name=REGION)
-    prompt = PROMPT.format(today=datetime.date.today().isoformat(), user=USER_NAME, transcript=transcript)
     response = client.converse(
         modelId=MODEL_ID,
         messages=[{"role": "user", "content": [{"text": prompt}]}],
@@ -51,7 +95,27 @@ def extract_tasks(transcript: str) -> list[dict]:
     )
     text = response["output"]["message"]["content"][0]["text"]
     start, end = text.find("["), text.rfind("]")
+    if start == -1 or end == -1:
+        return []
     return json.loads(text[start : end + 1])
+
+
+def due_bucket(due: str | None) -> str:
+    """Group a task by due date: Overdue / Today / Tomorrow / Later / No date."""
+    if not due:
+        return "No date"
+    try:
+        d = datetime.date.fromisoformat(due)
+    except ValueError:
+        return "No date"
+    delta = (d - datetime.date.today()).days
+    if delta < 0:
+        return "Overdue"
+    if delta == 0:
+        return "Today"
+    if delta == 1:
+        return "Tomorrow"
+    return "Later"
 
 
 def write_markdown(tasks: list[dict], path: str = "tasks.md") -> None:
@@ -65,7 +129,7 @@ def write_markdown(tasks: list[dict], path: str = "tasks.md") -> None:
 
 
 if __name__ == "__main__":
-    transcript = get_transcript(demo="--demo" in sys.argv)
-    tasks = extract_tasks(transcript)
+    convs = fetch_conversations(demo="--demo" in sys.argv)
+    tasks = extract_tasks(convs)
     write_markdown(tasks)
     print(open("tasks.md").read())
