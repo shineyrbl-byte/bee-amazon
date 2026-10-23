@@ -80,3 +80,7 @@ Only record yourself or people who have agreed to be recorded.
 ## License
 
 MIT, see `LICENSE`.
+
+## Friction log
+
+Developer-experience notes from building this are in [FRICTION_LOG.md](FRICTION_LOG.md).
